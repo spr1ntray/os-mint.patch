@@ -1,0 +1,2 @@
+httpx[socks]==0.28.1
+eth-account>=0.13,<0.14

@@ -1,0 +1,147 @@
+{
+  "$schema": "https://soft-hub.local/schemas/plugin-v1.json",
+  "schema_version": 1,
+  "contract_version": "SH-SOFTWARE-0.6/4",
+  "id": "io.sprintray.os-mint",
+  "name": "OS MINT",
+  "version": "1.0.2",
+  "description": "Автоминт OpenSea по slug. Public не трогает.",
+  "author": "sprintray",
+  "presentation": {
+    "display_name": "OS MINT",
+    "description": "Вставь ссылки или slug коллекций. Софт ждёт ваш WL и минтит. Продажу не ставит.",
+    "assets": {
+      "icon": "assets/icon.png",
+      "image": "assets/image.png"
+    }
+  },
+  "catalog": {
+    "sections": ["nft"]
+  },
+  "compatibility": {
+    "hub": ">=0.6.15",
+    "python": ">=3.12,<3.13",
+    "os": ["darwin"]
+  },
+  "runtime": {
+    "type": "python",
+    "entrypoint": "plugin.main:run",
+    "protocol": "soft-hub-jsonl/1",
+    "state_model": "externally_reconciled",
+    "requirements": "requirements.txt",
+    "safe_stop": true,
+    "heartbeat_seconds": 15
+  },
+  "permissions": {
+    "secrets": ["evm_private_key", "proxy"],
+    "network": [
+      "api.opensea.io",
+      "opensea.io",
+      "rpc.mainnet.chain.robinhood.com"
+    ],
+    "chains": [4663],
+    "financial_risk": "mainnet",
+    "browser": false,
+    "local_services": []
+  },
+  "actions": [
+    {
+      "id": "mint",
+      "name": "Минт",
+      "description": "Ждёт любую не-public стадию по указанным коллекциям и минтит.",
+      "risk": "mainnet_write",
+      "account_mode": "one_or_more",
+      "confirmation_phrase": "OS MINT",
+      "permissions": {
+        "secrets": ["evm_private_key", "proxy"]
+      },
+      "resources": {
+        "account": ["private_key", "proxy"],
+        "settings": []
+      },
+      "output": {
+        "mode": "account_table",
+        "title": "Автоминт OpenSea",
+        "primary_kind": "account_mint",
+        "columns": [
+          {"key": "outcome", "title": "Итог", "type": "string"},
+          {"key": "stage", "title": "Стадия", "type": "string"},
+          {"key": "minted", "title": "Сминтил", "type": "boolean"},
+          {"key": "token_id", "title": "Token", "type": "string"},
+          {"key": "tx_hash", "title": "Tx", "type": "string"}
+        ]
+      },
+      "options": {
+        "type": "object",
+        "properties": {
+          "account_concurrency": {
+            "type": "integer",
+            "title": "Параллельные аккаунты",
+            "description": "Сколько кошельков минтить сразу, когда откроется WL.",
+            "default": 5,
+            "minimum": 1,
+            "maximum": 20,
+            "multipleOf": 1,
+            "x-ui": {"group": "Выполнение", "order": 0, "unit": "аккаунтов"}
+          },
+          "collection_slugs": {
+            "type": "string",
+            "title": "Коллекции",
+            "description": "Один или много slug. Можно ссылки OpenSea. Каждый с новой строки или через запятую.",
+            "maxLength": 4000,
+            "x-ui": {
+              "group": "Минт",
+              "order": 5,
+              "control": "textarea",
+              "placeholder": "kuporh\nhttps://opensea.io/collection/hoodiegroupies"
+            }
+          },
+          "watch_minutes": {
+            "type": "integer",
+            "title": "Ждать WL",
+            "description": "Сколько минут смотреть все указанные коллекции. Можно оставить на ночь.",
+            "default": 2880,
+            "minimum": 5,
+            "maximum": 10080,
+            "multipleOf": 1,
+            "x-ui": {"group": "Ожидание", "order": 10, "unit": "мин"}
+          },
+          "poll_interval_seconds": {
+            "type": "integer",
+            "title": "Интервал опроса",
+            "description": "Как часто спрашивать стадии. Безопасное значение — 3 секунды.",
+            "default": 3,
+            "minimum": 2,
+            "maximum": 60,
+            "multipleOf": 1,
+            "x-ui": {"group": "Ожидание", "order": 20, "unit": "сек"}
+          },
+          "max_mint_eth": {
+            "type": "string",
+            "title": "Потолок минта",
+            "description": "0 — только бесплатный WL. Больше нуля — максимальная цена WL в ETH. Дороже пропускаем.",
+            "default": "0",
+            "maxLength": 24,
+            "x-ui": {"group": "Минт", "order": 25, "placeholder": "0"}
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "title": "Таймаут запроса",
+            "description": "Сетевой таймаут proxy, RPC и OpenSea. Безопасное значение — 30.",
+            "default": 30,
+            "minimum": 5,
+            "maximum": 120,
+            "multipleOf": 1,
+            "x-ui": {"group": "Сеть", "order": 30, "unit": "сек", "advanced": true}
+          }
+        },
+        "required": ["collection_slugs"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "ui": {
+    "accent": "#E8C36A",
+    "monogram": "OS"
+  }
+}
