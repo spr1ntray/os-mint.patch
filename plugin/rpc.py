@@ -46,6 +46,42 @@ def rpc_call(
     return data.get("result")
 
 
+def _hex_int(value: object) -> int:
+    if isinstance(value, int):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        raise RpcError("rpc_error")
+    try:
+        return int(text, 16) if text.startswith("0x") else int(text)
+    except ValueError as exc:
+        raise RpcError("rpc_error") from exc
+
+
+def get_native_balance(*, wallet: str, proxy: str, timeout_seconds: int) -> int:
+    raw = rpc_call(
+        method="eth_getBalance",
+        params=[wallet, "latest"],
+        proxy=proxy,
+        timeout_seconds=timeout_seconds,
+    )
+    if not isinstance(raw, (str, int)):
+        raise RpcError("rpc_error")
+    return _hex_int(raw)
+
+
+def get_gas_price(*, proxy: str, timeout_seconds: int) -> int:
+    raw = rpc_call(
+        method="eth_gasPrice",
+        params=[],
+        proxy=proxy,
+        timeout_seconds=timeout_seconds,
+    )
+    if not isinstance(raw, (str, int)):
+        raise RpcError("rpc_error")
+    return max(1, _hex_int(raw))
+
+
 def assert_chain(*, proxy: str, timeout_seconds: int) -> None:
     raw = rpc_call(
         method="eth_chainId",

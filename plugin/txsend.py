@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from eth_account import Account
 
 from plugin.identity import CHAIN_ID
-from plugin.rpc import RpcError, rpc_call
+from plugin.rpc import RpcError, get_gas_price, get_native_balance, rpc_call
+
+PREFLIGHT_GAS_UNITS = 250_000
+
+
+class InsufficientFunds(Exception):
+    def __init__(
+        self,
+        *,
+        balance: int,
+        need: int,
+        value: int = 0,
+        gas_cost: int = 0,
+    ) -> None:
+        self.balance = int(balance)
+        self.need = int(need)
+        self.value = int(value)
+        self.gas_cost = int(gas_cost)
+        super().__init__("insufficient_funds")
 
 
 def _hex_int(value: object) -> int:
@@ -17,6 +36,49 @@ def _hex_int(value: object) -> int:
     if not text:
         return 0
     return int(text, 16) if text.startswith("0x") else int(text)
+
+
+def tx_gas_limit(estimate: int) -> int:
+    estimate = max(0, int(estimate))
+    return max(estimate * 12 // 10, estimate + 21_000)
+
+
+def tx_need_wei(value: int, gas: int, gas_price: int) -> int:
+    return max(0, int(value)) + max(0, int(gas)) * max(1, int(gas_price))
+
+
+def preflight_gas_reserve(gas_price: int) -> int:
+    return tx_need_wei(0, PREFLIGHT_GAS_UNITS, gas_price)
+
+
+def wei_to_eth(wei: int) -> str:
+    text = format(Decimal(int(wei)) / Decimal(10**18), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def funds_message(err: InsufficientFunds) -> str:
+    if err.balance <= 0:
+        return "На кошельке нет ETH"
+    have = wei_to_eth(err.balance)
+    need = wei_to_eth(err.need)
+    if err.value <= 0:
+        return f"Не хватает ETH на газ: нужно {need}, на кошельке {have}"
+    return f"Не хватает ETH на минт и газ: нужно {need}, на кошельке {have}"
+
+
+def assert_preflight_funds(*, wallet: str, proxy: str, timeout_seconds: int) -> int:
+    balance = get_native_balance(
+        wallet=wallet,
+        proxy=proxy,
+        timeout_seconds=timeout_seconds,
+    )
+    gas_price = get_gas_price(proxy=proxy, timeout_seconds=timeout_seconds)
+    need = preflight_gas_reserve(gas_price)
+    if balance < need:
+        raise InsufficientFunds(balance=balance, need=need, value=0, gas_cost=need)
+    return balance
 
 
 def _to_hex(value: int) -> str:
@@ -33,6 +95,20 @@ def send_prepared_tx(
     timeout_seconds: int,
 ) -> str:
     account = Account.from_key(private_key)
+    value_wei = _hex_int(value)
+    value_hex = value if str(value).startswith("0x") else _to_hex(value_wei)
+    balance = get_native_balance(
+        wallet=account.address,
+        proxy=proxy,
+        timeout_seconds=timeout_seconds,
+    )
+    if balance < value_wei:
+        raise InsufficientFunds(
+            balance=balance,
+            need=value_wei,
+            value=value_wei,
+            gas_cost=0,
+        )
     nonce = _hex_int(
         rpc_call(
             method="eth_getTransactionCount",
@@ -41,14 +117,7 @@ def send_prepared_tx(
             timeout_seconds=timeout_seconds,
         )
     )
-    gas_price = _hex_int(
-        rpc_call(
-            method="eth_gasPrice",
-            params=[],
-            proxy=proxy,
-            timeout_seconds=timeout_seconds,
-        )
-    )
+    gas_price = get_gas_price(proxy=proxy, timeout_seconds=timeout_seconds)
     estimate = _hex_int(
         rpc_call(
             method="eth_estimateGas",
@@ -57,22 +126,32 @@ def send_prepared_tx(
                     "from": account.address,
                     "to": to,
                     "data": data,
-                    "value": value if str(value).startswith("0x") else _to_hex(_hex_int(value)),
+                    "value": value_hex,
                 }
             ],
             proxy=proxy,
             timeout_seconds=timeout_seconds,
         )
     )
+    gas = tx_gas_limit(estimate)
+    gas_cost = gas * gas_price
+    need = tx_need_wei(value_wei, gas, gas_price)
+    if balance < need:
+        raise InsufficientFunds(
+            balance=balance,
+            need=need,
+            value=value_wei,
+            gas_cost=gas_cost,
+        )
     signed = account.sign_transaction(
         {
             "chainId": CHAIN_ID,
             "nonce": nonce,
             "to": to,
             "data": data,
-            "value": _hex_int(value),
-            "gas": max(estimate * 12 // 10, estimate + 21_000),
-            "gasPrice": gas_price or 1,
+            "value": value_wei,
+            "gas": gas,
+            "gasPrice": gas_price,
         }
     )
     raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")

@@ -17,7 +17,14 @@ from plugin.opensea_drop import (
 )
 from plugin.proxy import proxy_to_url
 from plugin.rpc import RpcError
-from plugin.txsend import send_prepared_tx, token_id_from_receipt, wait_receipt
+from plugin.txsend import (
+    InsufficientFunds,
+    assert_preflight_funds,
+    funds_message,
+    send_prepared_tx,
+    token_id_from_receipt,
+    wait_receipt,
+)
 from plugin.wallets import normalize_wallet
 
 MINT_KIND = "account_mint"
@@ -87,12 +94,18 @@ def _run_mint(context: HubContext) -> dict[str, Any]:
             status="running",
             stage="preflight",
             progress=0.05,
-            message="Проверяем кошелёк и proxy",
+            message="Проверяем кошелёк, proxy и баланс",
         )
         try:
-            normalize_wallet(account.evm_address)
-            proxy_to_url(account.secret("proxy"))
+            wallet = normalize_wallet(account.evm_address)
+            proxy = account.secret("proxy")
+            proxy_to_url(proxy)
             account.secret("evm_private_key")
+            assert_preflight_funds(
+                wallet=wallet,
+                proxy=proxy,
+                timeout_seconds=timeout_seconds,
+            )
         except (KeyError, ValueError):
             _finish_mint(
                 context,
@@ -102,6 +115,30 @@ def _run_mint(context: HubContext) -> dict[str, Any]:
                 message="Нет приватника или proxy",
                 result_status="blocked",
                 data=_empty_mint("blocked", "preflight"),
+            )
+            counters["blocked"] += 1
+            continue
+        except InsufficientFunds as err:
+            _finish_mint(
+                context,
+                account,
+                status="blocked",
+                stage="preflight",
+                message=funds_message(err),
+                result_status="blocked",
+                data=_empty_mint("insufficient_funds", "preflight"),
+            )
+            counters["blocked"] += 1
+            continue
+        except RpcError:
+            _finish_mint(
+                context,
+                account,
+                status="blocked",
+                stage="preflight",
+                message="Не удалось проверить баланс",
+                result_status="blocked",
+                data=_empty_mint("balance_check", "preflight"),
             )
             counters["blocked"] += 1
             continue
@@ -343,6 +380,17 @@ def _mint_one(
             progress=1.0,
         )
         return "succeeded"
+    except InsufficientFunds as err:
+        _finish_mint(
+            context,
+            account,
+            status="failed",
+            stage="failed",
+            message=funds_message(err),
+            result_status="failed",
+            data=_empty_mint("insufficient_funds", "mint"),
+        )
+        return "failed"
     except RpcError:
         _finish_mint(
             context,
@@ -428,6 +476,8 @@ def _reject_message(code: str) -> str:
         "reverted": "Минт ревертнулся в сети",
         "rpc_error": "RPC не принял транзакцию",
         "mint_too_expensive": "Цена WL выше потолка",
+        "insufficient_funds": "Не хватает ETH на минт или газ",
+        "balance_check": "Не удалось проверить баланс",
         "invalid_price": "Некорректный потолок цены минта",
         "nothing_to_claim": "Клеймить было нечего",
     }
