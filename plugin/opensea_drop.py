@@ -136,10 +136,45 @@ def price_within_cap(price_wei: int | None, max_mint_wei: int) -> bool:
     return int(price_wei) <= max(0, int(max_mint_wei))
 
 
+def _int_supply(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text, 0) if text.startswith("0x") else int(text)
+    except ValueError:
+        return None
+
+
+def drop_sold_out(drop: dict[str, Any] | None) -> bool:
+    if not drop:
+        return False
+    total = _int_supply(_field(drop, "total_supply", "totalSupply"))
+    maximum = _int_supply(_field(drop, "max_supply", "maxSupply"))
+    return total is not None and maximum is not None and maximum > 0 and total >= maximum
+
+
+def active_stage_id(drop: dict[str, Any] | None) -> str:
+    if not drop:
+        return ""
+    stage = _field(drop, "active_stage", "activeStage")
+    if not isinstance(stage, dict):
+        return ""
+    return str(_field(stage, "uuid") or _field(stage, "label") or "").strip()
+
+
+def watch_poll_seconds(poll_seconds: int, slug_count: int) -> int:
+    """Instant OS key is 600 reads/hour shared by every slug."""
+    need = 6 * max(1, int(slug_count))
+    return min(60, max(int(poll_seconds), need))
+
+
 def collection_gate(drop: dict[str, Any] | None, max_mint_wei: int) -> str:
     """wait | mintable | public | ended"""
     if not drop:
         return "wait"
+    if drop_sold_out(drop):
+        return "ended"
     stage = classify_drop(drop)
     if stage == STAGE_PUBLIC:
         return "public"
@@ -277,6 +312,23 @@ def read_drop_snapshot(*, proxy: str, timeout_seconds: int) -> dict[str, Any]:
     }
 
 
+_SOLD_OUT_MARKERS = (
+    "minted out",
+    "sold out",
+    "supply exhausted",
+    "no supply",
+    "fully minted",
+    "max supply",
+)
+
+
+def _mint_precondition_code(body: str) -> str:
+    text = (body or "").lower()
+    if any(marker in text for marker in _SOLD_OUT_MARKERS):
+        return "sold_out"
+    return "not_eligible"
+
+
 def build_mint_tx(
     *,
     slug: str,
@@ -297,8 +349,10 @@ def build_mint_tx(
         raise DropRejected("mint_request") from exc
     if response.status_code == 409:
         raise DropRejected("drop_inactive")
+    if response.status_code == 429 or response.status_code >= 500:
+        raise DropRejected("rate_limited")
     if response.status_code == 422:
-        raise DropRejected("not_eligible")
+        raise DropRejected(_mint_precondition_code(response.text))
     if response.status_code >= 400:
         raise DropRejected("mint_request")
     data = response.json()

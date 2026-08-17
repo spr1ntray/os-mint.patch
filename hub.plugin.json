@@ -4,7 +4,7 @@
   "contract_version": "SH-SOFTWARE-0.6/4",
   "id": "io.sprintray.os-mint",
   "name": "OS MINT",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Автоминт OpenSea по slug. Public не трогает.",
   "author": "sprintray",
   "presentation": {
@@ -109,8 +109,8 @@
           "poll_interval_seconds": {
             "type": "integer",
             "title": "Интервал опроса",
-            "description": "Как часто спрашивать стадии. Безопасное значение — 3 секунды.",
-            "default": 3,
+            "description": "Как часто спрашивать стадии. Меньше 6 сек ключ OpenSea режет.",
+            "default": 8,
             "minimum": 2,
             "maximum": 60,
             "multipleOf": 1,

@@ -9,11 +9,13 @@ from plugin.identity import parse_slug_blob
 from plugin.listing import parse_eth_wei
 from plugin.opensea_drop import (
     DropRejected,
+    active_stage_id,
     active_stage_watch_message,
     assert_safe_mint_tx,
     build_mint_tx,
     inspect_slugs,
     tx_value_wei,
+    watch_poll_seconds,
 )
 from plugin.proxy import proxy_to_url
 from plugin.rpc import RpcError
@@ -39,9 +41,12 @@ def run(context: HubContext) -> dict[str, Any]:
 
 def _run_mint(context: HubContext) -> dict[str, Any]:
     timeout_seconds = _int_option(context.options, "timeout_seconds", 30, 5, 120)
-    poll_seconds = _int_option(context.options, "poll_interval_seconds", 3, 2, 60)
-    watch_minutes = _int_option(context.options, "watch_minutes", 2880, 5, 10080)
     slugs = parse_slug_blob(str(context.options.get("collection_slugs") or ""))
+    poll_seconds = watch_poll_seconds(
+        _int_option(context.options, "poll_interval_seconds", 8, 2, 60),
+        len(slugs),
+    )
+    watch_minutes = _int_option(context.options, "watch_minutes", 2880, 5, 10080)
     try:
         max_mint_wei = parse_eth_wei(
             str(context.options.get("max_mint_eth") or "0"),
@@ -167,10 +172,12 @@ def _run_mint(context: HubContext) -> dict[str, Any]:
                 message=message,
             )
 
-    lead = ready[0]
+    proxies = [account.secret("proxy") for account in ready]
     deadline = time.monotonic() + watch_minutes * 60
     closed_slugs: set[str] = set()
     best: dict[str, str] = {}
+    skip_stage: dict[tuple[str, str], str] = {}
+    poll_tick = 0
     _watching()
     try:
         while True:
@@ -178,12 +185,12 @@ def _run_mint(context: HubContext) -> dict[str, Any]:
             if all(best.get(account.id) == "succeeded" for account in ready):
                 break
             rows = inspect_slugs(
-                proxy=lead.secret("proxy"),
+                proxy=proxies[poll_tick % len(proxies)],
                 timeout_seconds=timeout_seconds,
                 max_mint_wei=max_mint_wei,
                 slugs=slugs,
             )
-            minted_now = False
+            poll_tick += 1
             for row in rows:
                 slug = str(row["slug"])
                 if slug in closed_slugs:
@@ -194,9 +201,15 @@ def _run_mint(context: HubContext) -> dict[str, Any]:
                     continue
                 if state != "mintable":
                     continue
-                pending = [account for account in ready if best.get(account.id) != "succeeded"]
+                stage_key = active_stage_id(row.get("drop") if isinstance(row.get("drop"), dict) else None)
+                pending = [
+                    account
+                    for account in ready
+                    if best.get(account.id) != "succeeded"
+                    and (not stage_key or skip_stage.get((account.id, slug)) != stage_key)
+                ]
                 if not pending:
-                    break
+                    continue
                 _watching(extra=f"Минтим {slug}. Одна NFT, public не трогаем")
                 outcomes = context.map_accounts(
                     lambda account, row=row: _mint_one(
@@ -209,14 +222,16 @@ def _run_mint(context: HubContext) -> dict[str, Any]:
                     ),
                     accounts=tuple(pending),
                 )
-                minted_now = True
                 for account, status in zip(pending, outcomes, strict=True):
                     if status == "waiting":
+                        if stage_key:
+                            skip_stage[(account.id, slug)] = stage_key
+                        continue
+                    if status == "sold_out":
+                        closed_slugs.add(slug)
                         continue
                     if best.get(account.id) != "succeeded":
                         best[account.id] = status
-                if any(status == "succeeded" for status in outcomes):
-                    closed_slugs.add(slug)
             if all(best.get(account.id) == "succeeded" for account in ready):
                 break
             if closed_slugs.issuperset(slugs):
@@ -237,14 +252,13 @@ def _run_mint(context: HubContext) -> dict[str, Any]:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            if not minted_now:
-                notes = [
-                    active_stage_watch_message(row.get("drop"))
-                    for row in rows
-                    if row.get("drop")
-                ]
-                _watching(extra=next((note for note in notes if note), ""))
-                _interruptible_sleep(context, min(float(poll_seconds), remaining))
+            notes = [
+                active_stage_watch_message(row.get("drop"))
+                for row in rows
+                if row.get("drop")
+            ]
+            _watching(extra=next((note for note in notes if note), ""))
+            _interruptible_sleep(context, min(float(poll_seconds), remaining))
     except CancelledError:
         for account in ready:
             if account.id in best:
@@ -310,15 +324,21 @@ def _mint_one(
                 raise DropRejected("mint_too_expensive")
         except DropRejected as err:
             code = str(err)
-            if code in {"not_eligible", "drop_inactive"}:
+            if code in {"not_eligible", "drop_inactive", "rate_limited"}:
                 context.account_state(
                     account.id,
                     status="running",
                     stage="watch",
                     progress=0.18,
-                    message="Эта стадия не для нас. Ждём свой WL",
+                    message=(
+                        "OpenSea просит подождать"
+                        if code == "rate_limited"
+                        else "Эта стадия не для нас. Ждём свой WL"
+                    ),
                 )
                 return "waiting"
+            if code == "sold_out":
+                return "sold_out"
             _finish_mint(
                 context,
                 account,
@@ -467,6 +487,8 @@ def _reject_message(code: str) -> str:
         "drop_request": "Не удалось прочитать drop на OpenSea",
         "mint_request": "OpenSea не собрала транзакцию минта",
         "drop_inactive": "Drop ещё не активен",
+        "sold_out": "Коллекция уже распродана",
+        "rate_limited": "OpenSea временно режет запросы",
         "not_eligible": "Кошелёк не в allowlist этой стадии",
         "bad_target": "OpenSea вернула чужой контракт — не шлём",
         "bad_calldata": "OpenSea вернула пустой calldata",
